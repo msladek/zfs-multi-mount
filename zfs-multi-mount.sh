@@ -11,42 +11,45 @@ help() {
     exit 0
 }
 
-for arg in "$@"; do
-  case $arg in
-  -s | --systemd)
-    systemd=1
-    shift
-    ;;
-  -n | --no-mount)
-    no_mount=1
-    shift
-    ;;
-  -h | --help) help ;;
-  -?*)
-    die "Invalid option '$1' Try '$(basename "$0") --help' for more information." ;;
+while getopts "snh" opt; do
+  case $opt in
+    s|--systemd) systemd=1 ;;
+    n|--no-mount) no_mount=1 ;;
+    h|--help) help ;;
+    ?) echo "Invalid option '-$OPTARG'. Try '$(basename "$0") --help' for more information." && exit 1 ;;
   esac
 done
 
-datasets=("$@")
+datasets=("${@:$OPTIND}")
 [ ${#datasets[@]} -eq 0 ] && mapfile -t datasets < <(zfs list -H -o name)
 attempt=0
 attempt_limit=3
 
+function import_pool {
+  local pool=${1%%/*}
+  ! zpool list -H -o name | grep -qx "$pool" \
+    && echo "Pool '$pool' not found, trying import..." \
+    && zpool import "$pool"
+  ! zfs list -H -o name | grep -qx "$1" \
+    && echo "ERROR: Dataset '$1' does not exist." \
+    && return 1
+  return 0
+}
+
 function ask_password {
   if [ -v systemd ]; then
-    key=$(systemd-ask-password "Enter $dataset passphrase") # With systemd.
+    key=$(systemd-ask-password "Enter $1 passphrase") # With systemd.
   else
-    read -srp "Enter $dataset passphrase: " key ; echo # Other places.
+    read -srp "Enter $1 passphrase: " key ; echo # Other places.
   fi
 }
 
 function load_key {
-  ! zfs list -H -o name | grep -qx "$dataset" && echo "ERROR: Dataset '$dataset' does not exist." && return 1
   [[ $attempt == "$attempt_limit" ]] && echo "No more attempts left." && exit 1
   [[ ! $(zfs get keystatus "$1" -H -o value) == "unavailable" ]] && return 0
   if [ ! -v key ]; then
     ((attempt++))
-    ask_password
+    ask_password $1
   fi
   if ! echo "$key" | zfs load-key "$1"; then
     unset key
@@ -57,8 +60,7 @@ function load_key {
 }
 
 for dataset in "${datasets[@]}"; do
-  ! load_key "$dataset" && exit 1
-
+  import_pool $dataset && load_key "$dataset" || exit 1
   # Mounting as non-root user on Linux is not possible,
   # see https://github.com/openzfs/zfs/issues/10648.
   [ ! -v no_mount ] && sudo zfs mount "$dataset" && echo "Dataset '$dataset' has been mounted."
