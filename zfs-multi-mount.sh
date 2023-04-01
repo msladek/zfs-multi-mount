@@ -34,7 +34,7 @@ attempt_limit=3
 
 function ask_password {
   if [ -v systemd ]; then
-    key=$(systemd-ask-password "Enter $dataset passphrase:" --no-tty) # While booting.
+    key=$(systemd-ask-password "Enter $dataset passphrase") # With systemd.
   else
     read -srp "Enter $dataset passphrase: " key ; echo # Other places.
   fi
