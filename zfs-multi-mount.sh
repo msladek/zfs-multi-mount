@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set -euo pipefail
 
 PATH=$PATH:/usr/bin:/sbin:/bin
 
@@ -6,26 +7,27 @@ help() {
     echo "Usage: $(basename "$0") [OPTION]... [SOURCE_POOL/DATASET]..."
     echo
     echo " -s, --systemd        use when within systemd context"
-    echo " -n, --no-mount       only load keys, do not mount datasets"
+    echo " -m, --mount          mount datasets after loading keys"
     echo " -h, --help           show this help"
     exit 0
 }
 
-while getopts "snh" opt; do
-  case $opt in
-    s|--systemd) systemd=1 ;;
-    n|--no-mount) no_mount=1 ;;
-    h|--help) help ;;
-    ?) echo "Invalid option '-$OPTARG'. Try '$(basename "$0") --help' for more information." && exit 1 ;;
+systemd=false
+mount=false
+for arg in "$@"; do
+  case $arg in
+    -s | --systemd) systemd=true; shift ;;
+    -m | --mount) mount=true; shift ;;
+    -h | --help) help ;;
+    -?*) echo "Invalid option '$1' Try '$(basename "$0") --help' for more information."; exit 1 ;;
   esac
 done
 
-datasets=("${@:$OPTIND}")
+datasets=("$@")
 [ ${#datasets[@]} -eq 0 ] && mapfile -t datasets < <(zfs list -H -o name)
-attempt=0
 attempt_limit=3
 
-function import_pool {
+function exists_or_import {
   local pool=${1%%/*}
   ! zpool list -H -o name | grep -qx "$pool" \
     && echo "Pool '$pool' not found, trying import..." \
@@ -37,35 +39,28 @@ function import_pool {
 }
 
 function ask_password {
-  if [ -v systemd ]; then
+  local key
+  if $systemd; then
     key=$(systemd-ask-password "Enter $1 passphrase") # With systemd.
   else
     read -srp "Enter $1 passphrase: " key ; echo # Other places.
   fi
+  echo "$key"
 }
 
 function load_key {
-  [[ $attempt == "$attempt_limit" ]] && echo "No more attempts left." && exit 1
-  [[ ! $(zfs get keystatus "$1" -H -o value) == "unavailable" ]] && return 0
-  if [ ! -v key ]; then
-    ((attempt++))
-    ask_password $1
-  fi
-  if ! echo "$key" | zfs load-key "$1"; then
-    unset key
-    load_key "$1"
-  fi
-  attempt=0
-  return 0
+  local attempt=${2:-0}
+  [ "$attempt" -ge "$attempt_limit" ] && echo "No more attempts left." && return 1
+  [ "$(zfs get keystatus "$1" -H -o value)" = "unavailable" ] || return 0
+  ask_password "$1" | zfs load-key "$1" && return 0
+  load_key "$1" $((attempt + 1))
 }
 
 for dataset in "${datasets[@]}"; do
-  import_pool $dataset && load_key "$dataset" || exit 1
+  exists_or_import "$dataset" && load_key "$dataset" || exit 1
   # Mounting as non-root user on Linux is not possible,
   # see https://github.com/openzfs/zfs/issues/10648.
-  [ ! -v no_mount ] && sudo zfs mount "$dataset" && echo "Dataset '$dataset' has been mounted."
+  $mount && sudo zfs mount "$dataset" && echo "Dataset '$dataset' has been mounted."
 done
-
-unset key
 
 exit 0
